@@ -33,4 +33,4 @@ jobs:
 
       - name: Run pytest
         run: |
-          pytest --cov=sesame_ble --cov-report=term-missing
+          pytest --cov=pysesame_ble --cov-report=term-missing

@@ -5,8 +5,8 @@ from uuid import UUID
 
 import pytest
 
-from sesame_ble.const import COMPANY_ID
-from sesame_ble.models import (
+from pysesame_ble.const import COMPANY_ID
+from pysesame_ble.models import (
     ProductModels,
     SesameAdData,
     calculate_battery_percentage,

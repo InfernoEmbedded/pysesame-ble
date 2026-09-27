@@ -2,13 +2,13 @@
 
 import pytest
 
-from sesame_ble.crypto import (
+from pysesame_ble.crypto import (
     SesameCipher,
     derive_device_secret,
     derive_session_token_key,
     generate_ecc_keypair,
 )
-from sesame_ble.exceptions import SesameAuthenticationError
+from pysesame_ble.exceptions import SesameAuthenticationError
 
 
 def test_ecc_keypair_generation() -> None:

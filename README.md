@@ -1,8 +1,8 @@
-# sesame-ble
+# pysesame-ble
 
-[![PyPI version](https://img.shields.io/pypi/v/sesame-ble.svg)](https://pypi.org/project/sesame-ble/)
+[![PyPI version](https://img.shields.io/pypi/v/pysesame-ble.svg)](https://pypi.org/project/pysesame-ble/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Python Versions](https://img.shields.io/pypi/pyversions/sesame-ble.svg)](https://pypi.org/project/sesame-ble/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/pysesame-ble.svg)](https://pypi.org/project/pysesame-ble/)
 
 A fast, 100% local Python library for controlling CANDY HOUSE Sesame smart locks and accessories over Bluetooth Low Energy (BLE) using `bleak` and standard `cryptography`.
 
@@ -32,7 +32,7 @@ A fast, 100% local Python library for controlling CANDY HOUSE Sesame smart locks
 ## Installation
 
 ```bash
-pip install sesame-ble
+pip install pysesame-ble
 ```
 
 ## Quick Start
@@ -43,7 +43,7 @@ pip install sesame-ble
 import asyncio
 from uuid import UUID
 from bleak import BleakScanner
-from sesame_ble import SesameLock, SesameAdData, find_sesame_device
+from pysesame_ble import SesameLock, SesameAdData, find_sesame_device
 
 async def main():
     mac = "AA:BB:CC:DD:EE:FF"
@@ -79,7 +79,7 @@ asyncio.run(main())
 ### 2. Parse a Setup QR Code (`ssm://`)
 
 ```python
-from sesame_ble import SesameQRCode
+from pysesame_ble import SesameQRCode
 
 qr_url = "ssm://UI?t=sk&sk=...&l=0&n=Front%20Door"
 qr = SesameQRCode.from_url(qr_url)
@@ -94,7 +94,7 @@ print(f"Secret Key (Hex): {qr.secret_key.hex()}")
 
 ```python
 import asyncio
-from sesame_ble import scan_sesame_devices
+from pysesame_ble import scan_sesame_devices
 
 async def main():
     devices = await scan_sesame_devices(timeout=5.0)

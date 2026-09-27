@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 
-from sesame_ble.const import (
+from pysesame_ble.const import (
     ITEM_CARD_NOTIFY,
     ITEM_DOOR_CLOSED,
     ITEM_DOOR_OPEN,
@@ -17,7 +17,7 @@ from sesame_ble.const import (
     ITEM_PASSCODE_NOTIFY,
     ITEM_UNLOCK,
 )
-from sesame_ble.device import (
+from pysesame_ble.device import (
     SesameBot,
     SesameDevice,
     SesameKeypad,
@@ -26,8 +26,8 @@ from sesame_ble.device import (
     SesameSegmentLayer,
     create_sesame_device,
 )
-from sesame_ble.exceptions import SesameAuthenticationError
-from sesame_ble.models import ProductModels, SesameAdData
+from pysesame_ble.exceptions import SesameAuthenticationError
+from pysesame_ble.models import ProductModels, SesameAdData
 
 TEST_UUID = UUID("01234567-89ab-cdef-0123-456789abcdef")
 

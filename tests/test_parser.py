@@ -4,8 +4,8 @@ from uuid import UUID
 
 import pytest
 
-from sesame_ble.exceptions import SesameKeyError
-from sesame_ble.parser import SesameQRCode
+from pysesame_ble.exceptions import SesameKeyError
+from pysesame_ble.parser import SesameQRCode
 
 TEST_UUID = UUID("01234567-89ab-cdef-0123-456789abcdef")
 
