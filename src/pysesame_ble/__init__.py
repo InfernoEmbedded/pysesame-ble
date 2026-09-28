@@ -79,6 +79,7 @@ from .crypto import (
     generate_ecc_keypair,
 )
 from .device import (
+    BaseKeypad,
     SesameBikeLock,
     SesameBot,
     SesameDevice,
@@ -185,6 +186,7 @@ __all__ = [
     "RX_CHAR_UUID",
     "SERVICE_UUID",
     "TX_CHAR_UUID",
+    "BaseKeypad",
     "KeypadMechStatus",
     "ProductModels",
     "SesameAdData",

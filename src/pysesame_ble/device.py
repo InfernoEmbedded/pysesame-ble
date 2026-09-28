@@ -7,6 +7,7 @@ https://github.com/CANDY-HOUSE/API_document
 import asyncio
 import base64
 import contextlib
+import datetime
 import logging
 import random
 import struct
@@ -750,7 +751,198 @@ class SesameLock(SesameDevice):
         return records
 
 
-class SesameKeypad(SesameDevice):
+def parse_dt(dt_str: str) -> datetime.datetime | None:
+    """Parse an ISO format datetime string safely."""
+    if not dt_str:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(dt_str)
+    except Exception:
+        return None
+
+
+class BaseKeypad:
+    """Generic interface/base class for keypads with credential management and scheduling."""
+
+    def __init__(self) -> None:
+        self.passcodes: dict[str, dict[str, Any]] = {}
+        self.cards: dict[str, dict[str, Any]] = {}
+        self.fingerprints: dict[str, dict[str, Any]] = {}
+        self.faces: dict[str, dict[str, Any]] = {}
+        self.palms: dict[str, dict[str, Any]] = {}
+        self.cards_count = 0
+        self.fingerprints_count = 0
+        self.passcodes_count = 0
+        self.faces_count = 0
+        self.palms_count = 0
+
+    async def get_passcodes(self) -> dict[str, dict[str, Any]]:
+        """Fetch/sync passcodes from the keypad."""
+        raise NotImplementedError
+
+    async def add_passcode(self, code: str, name: str) -> None:
+        """Add a new passcode to the keypad."""
+        raise NotImplementedError
+
+    async def delete_passcode(self, code_or_id: str) -> None:
+        """Delete an existing passcode from the keypad."""
+        raise NotImplementedError
+
+    async def update_passcode_name(self, code_or_id: str, name: str) -> None:
+        """Update the nickname of an existing passcode on the keypad."""
+        raise NotImplementedError
+
+    async def get_cards(self) -> dict[str, dict[str, Any]]:
+        """Fetch/sync cards from the keypad."""
+        raise NotImplementedError
+
+    async def delete_card(self, card_id: str) -> None:
+        """Delete a card from the keypad."""
+        raise NotImplementedError
+
+    async def update_card_name(self, card_id: str, name: str) -> None:
+        """Update the nickname of an existing card on the keypad."""
+        raise NotImplementedError
+
+    async def get_fingerprints(self) -> dict[str, dict[str, Any]]:
+        """Fetch/sync fingerprints from the keypad."""
+        raise NotImplementedError
+
+    async def delete_fingerprint(self, finger_id: str) -> None:
+        """Delete a fingerprint from the keypad."""
+        raise NotImplementedError
+
+    async def update_fingerprint_name(self, finger_id: str, name: str) -> None:
+        """Update the nickname of an existing fingerprint on the keypad."""
+        raise NotImplementedError
+
+    async def get_faces(self) -> dict[str, dict[str, Any]]:
+        """Fetch/sync faces from the keypad."""
+        raise NotImplementedError
+
+    async def delete_face(self, face_id: str) -> None:
+        """Delete a face from the keypad."""
+        raise NotImplementedError
+
+    async def update_face_name(self, face_id: str, name: str) -> None:
+        """Update the nickname of an existing face on the keypad."""
+        raise NotImplementedError
+
+    async def get_palms(self) -> dict[str, dict[str, Any]]:
+        """Fetch/sync palms from the keypad."""
+        raise NotImplementedError
+
+    async def delete_palm(self, palm_id: str) -> None:
+        """Delete a palm from the keypad."""
+        raise NotImplementedError
+
+    async def update_palm_name(self, palm_id: str, name: str) -> None:
+        """Update the nickname of an existing palm on the keypad."""
+        raise NotImplementedError
+
+    async def apply_passcode_schedules(self, logical_passcodes: dict[str, dict[str, Any]]) -> bool:
+        """Evaluates schedules and synchronizes passcodes.
+
+        This implements the virtualization of time-windowed passcodes by checking
+        start/end times, weekly day lists, and daily time ranges, adding or
+        deleting passcodes accordingly.
+
+        Returns:
+            bool: True if any changes were made, False otherwise.
+        """
+        now = datetime.datetime.now()
+        changed = False
+
+        for uid, logical_info in list(logical_passcodes.items()):
+            # 1. Absolute date/time range check
+            start_dt = parse_dt(logical_info.get("start", ""))
+            end_dt = parse_dt(logical_info.get("end", ""))
+
+            should_be_active = True
+            if start_dt and now < start_dt:
+                should_be_active = False
+            if end_dt and now >= end_dt:
+                should_be_active = False
+
+            # 2. Weekly days check
+            days_list = logical_info.get("days")
+            if should_be_active and days_list:
+                try:
+                    int_days = [int(d) for d in days_list]
+                    if now.weekday() not in int_days:
+                        should_be_active = False
+                except (ValueError, TypeError) as err:
+                    logger.warning(
+                        "Invalid days list for passcode '%s': %s",
+                        logical_info.get("name"),
+                        err,
+                    )
+
+            # 3. Daily time range check
+            time_start_str = str(logical_info.get("time_start", "")).strip()
+            time_end_str = str(logical_info.get("time_end", "")).strip()
+            if should_be_active and (time_start_str or time_end_str):
+                current_time = now.time()
+                if time_start_str:
+                    try:
+                        h, m = map(int, time_start_str.split(":"))
+                        if current_time < datetime.time(h, m):
+                            should_be_active = False
+                    except (ValueError, TypeError) as err:
+                        logger.warning(
+                            "Invalid time_start '%s' for passcode '%s': %s",
+                            time_start_str,
+                            logical_info.get("name"),
+                            err,
+                        )
+                if time_end_str:
+                    try:
+                        h, m = map(int, time_end_str.split(":"))
+                        if current_time >= datetime.time(h, m):
+                            should_be_active = False
+                    except (ValueError, TypeError) as err:
+                        logger.warning(
+                            "Invalid time_end '%s' for passcode '%s': %s",
+                            time_end_str,
+                            logical_info.get("name"),
+                            err,
+                        )
+
+            is_physically_active = uid in self.passcodes
+
+            if should_be_active and not is_physically_active:
+                logger.info(
+                    "Scheduler: Adding passcode '%s' via virtualization",
+                    logical_info.get("name"),
+                )
+                try:
+                    await self.add_passcode(logical_info["code"], str(logical_info.get("name", "")))
+                    changed = True
+                except Exception as err:
+                    logger.error(
+                        "Failed to add passcode '%s': %s",
+                        logical_info.get("name"),
+                        err,
+                    )
+            elif not should_be_active and is_physically_active:
+                logger.info(
+                    "Scheduler: Removing passcode '%s' via virtualization",
+                    logical_info.get("name"),
+                )
+                try:
+                    await self.delete_passcode(uid)
+                    changed = True
+                except Exception as err:
+                    logger.error(
+                        "Failed to delete passcode '%s': %s",
+                        logical_info.get("name"),
+                        err,
+                    )
+
+        return changed
+
+
+class SesameKeypad(SesameDevice, BaseKeypad):
     """Subclass representing a Sesame Touch, Touch Pro, Face, or Face Pro keypad."""
 
     def __init__(
@@ -768,6 +960,7 @@ class SesameKeypad(SesameDevice):
             status_callback=status_callback,
             reconnect_attempts=reconnect_attempts,
         )
+        BaseKeypad.__init__(self)
         self.passcodes: dict[str, dict[str, Any]] = {}
         self.cards: dict[str, dict[str, Any]] = {}
         self.fingerprints: dict[str, dict[str, Any]] = {}

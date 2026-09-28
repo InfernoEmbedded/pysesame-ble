@@ -18,6 +18,7 @@ from pysesame_ble.const import (
     ITEM_UNLOCK,
 )
 from pysesame_ble.device import (
+    BaseKeypad,
     SesameBot,
     SesameDevice,
     SesameKeypad,
@@ -332,3 +333,30 @@ def test_on_gatt_notification_error_code() -> None:
     exc = fut.set_exception.call_args[0][0]
     assert isinstance(exc, SesameCommandError)
     assert exc.error_code == 5
+
+
+@pytest.mark.asyncio
+async def test_base_keypad_inheritance_and_scheduling() -> None:
+    """Test BaseKeypad inheritance and passcode schedule virtualization."""
+    assert issubclass(SesameKeypad, BaseKeypad)
+
+    mock_ble = MagicMock()
+    mock_ble.address = "AA:BB:CC:DD:EE:FF"
+    keypad = SesameKeypad(mock_ble)
+    assert isinstance(keypad, BaseKeypad)
+
+    keypad.add_passcode = AsyncMock()
+    keypad.delete_passcode = AsyncMock()
+
+    # Passcode that should be active
+    schedules = {
+        "user1": {
+            "name": "Active User",
+            "code": "123456",
+            "start": "2000-01-01T00:00:00",
+            "end": "2099-01-01T00:00:00",
+        }
+    }
+    changed = await keypad.apply_passcode_schedules(schedules)
+    assert changed is True
+    keypad.add_passcode.assert_awaited_once_with("123456", "Active User")
