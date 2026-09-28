@@ -16,10 +16,10 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
+import bleak_retry_connector
 from bleak import BleakClient, BleakScanner, BLEDevice
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.exc import BleakDeviceNotFoundError
-from bleak_retry_connector import establish_connection
 
 from .const import (
     ITEM_ADD_SESAME,
@@ -259,7 +259,7 @@ class SesameDevice:
         logger.info("Connecting to Sesame [address=%s]", self.address)
 
         try:
-            self._client = await establish_connection(
+            self._client = await bleak_retry_connector.establish_connection(
                 BleakClient,
                 self._ble_device,
                 "sesame_ble",
