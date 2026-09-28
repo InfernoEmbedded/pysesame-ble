@@ -45,6 +45,7 @@ from uuid import UUID
 from bleak import BleakScanner
 from pysesame_ble import SesameLock, SesameAdData, find_sesame_device
 
+
 async def main():
     mac = "AA:BB:CC:DD:EE:FF"
     secret_key = "0123456789abcdef0123456789abcdef"  # 16-byte hex secret key
@@ -73,6 +74,7 @@ async def main():
 
     await lock.disconnect()
 
+
 asyncio.run(main())
 ```
 
@@ -96,11 +98,15 @@ print(f"Secret Key (Hex): {qr.secret_key.hex()}")
 import asyncio
 from pysesame_ble import scan_sesame_devices
 
+
 async def main():
     devices = await scan_sesame_devices(timeout=5.0)
     for address, (ble_dev, ad_data) in devices.items():
         reg_status = "Registered" if ad_data.is_registered else "Unregistered"
-        print(f"[{address}] Model: {ad_data.model_id}, Status: {reg_status}, UUID: {ad_data.device_uuid}")
+        print(
+            f"[{address}] Model: {ad_data.model_id}, Status: {reg_status}, UUID: {ad_data.device_uuid}"
+        )
+
 
 asyncio.run(main())
 ```

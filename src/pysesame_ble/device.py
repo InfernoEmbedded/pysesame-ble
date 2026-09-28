@@ -6,7 +6,7 @@ https://github.com/CANDY-HOUSE/API_document
 
 import asyncio
 import base64
-import datetime
+import contextlib
 import logging
 import random
 import struct
@@ -99,38 +99,17 @@ from .exceptions import (
     SesameRegistrationError,
 )
 from .models import (
-    ProductModels,
     SesameAdData,
     calculate_battery_percentage,
     get_sesame_mfg_data,
+    is_bike_lock_model,
+    is_bot_model,
+    is_face_keypad_model,
     is_keypad_model,
+    is_open_sensor_model,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def parse_dt(dt_str: str) -> datetime.datetime | None:
-    """Parses ISO-8601 or common datetime string into a datetime object."""
-    if not dt_str:
-        return None
-    s = dt_str.strip()
-    try:
-        return datetime.datetime.fromisoformat(s)
-    except ValueError:
-        pass
-    for fmt in (
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y/%m/%d %H:%M:%S",
-        "%Y/%m/%d %H:%M",
-        "%d-%m-%Y %H:%M",
-        "%Y-%m-%d",
-    ):
-        try:
-            return datetime.datetime.strptime(s, fmt)
-        except ValueError:
-            pass
-    return None
 
 
 class SesameSegmentLayer:
@@ -236,6 +215,10 @@ class SesameDevice:
         self.mech_status: Any = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
+    def set_ble_device(self, ble_device: BLEDevice) -> None:
+        """Update the underlying BLEDevice reference."""
+        self._ble_device = ble_device
+
     @property
     def address(self) -> str:
         """The BLE MAC address."""
@@ -249,12 +232,20 @@ class SesameDevice:
         return self.address
 
     @property
+    def fw_version(self) -> str | None:
+        """Return the current firmware version string if fetched (compatibility alias)."""
+        return self.firmware_version
+
+    @property
     def is_connected(self) -> bool:
         """Return True if BLE client is actively connected."""
         return self._client is not None and self._client.is_connected
 
     async def connect(self) -> None:
         """Connects and starts notifications, waiting for the initial session token."""
+        if self._ble_device is None:
+            raise SesameConnectionError("No BLEDevice configured")
+
         if self._reconnect_task and not self._reconnect_task.done():
             if asyncio.current_task() is not self._reconnect_task:
                 raise SesameConnectionError("Cannot connect while auto-reconnecting")
@@ -340,11 +331,16 @@ class SesameDevice:
                 except Exception as e:
                     logger.warning("Failed to automatically synchronize clock on login: %s", e)
 
-            # Wait for mechanical settings/status to be published to complete login
-            try:
-                await asyncio.wait_for(self._login_event.wait(), timeout=5.0)
-            except TimeoutError:
-                logger.warning("Timed out waiting for initial mechanical settings/status publish")
+            # Wait for mechanical settings/status on devices that support it
+            if isinstance(self, SesameLock) or is_keypad_model(self.product_model):
+                try:
+                    await asyncio.wait_for(self._login_event.wait(), timeout=5.0)
+                except TimeoutError:
+                    logger.warning(
+                        "Timed out waiting for initial mechanical settings/status publish"
+                    )
+            else:
+                self._login_event.set()
 
             if self._status_cb:
                 self._status_cb(self, self)
@@ -417,6 +413,10 @@ class SesameDevice:
         was_logged_in = self.is_logged_in
         self.is_logged_in = False
         self._cipher = None
+        if self._token_future and not self._token_future.done():
+            self._token_future.set_exception(
+                SesameConnectionError("Disconnected before handshake completed")
+            )
         self._token_future = None
         self.mech_status = None
         self._login_event.clear()
@@ -504,7 +504,11 @@ class SesameDevice:
                     if result_code == 0:
                         fut.set_result(response_payload)
                     else:
-                        fut.set_exception(SesameCommandError(f"Command error code: {result_code}"))
+                        fut.set_exception(
+                            SesameCommandError(
+                                f"Command error code: {result_code}", error_code=result_code
+                            )
+                        )
         elif op_code == OP_PUBLISH:
             if len(body) >= 1:
                 item_code = body[0]
@@ -525,7 +529,6 @@ class SesameDevice:
         payload: bytes,
         encrypt: bool = True,
         wait_for_response: bool = True,
-        op_code: int | None = None,
     ) -> bytes:
         """Sends a structured request and awaits the result response."""
         async with self._send_lock:
@@ -537,13 +540,13 @@ class SesameDevice:
                     raise SesameAuthenticationError("Not logged in (cipher is missing)")
                 msg = self._cipher.encrypt_payload(msg)
 
-            transmission = msg
+            if not self._client or not self._client.is_connected:
+                raise SesameConnectionError("Not connected")
+
+            packets = self._segmenter.segment_payload(msg, encrypt)
 
             if not wait_for_response:
-                packets = self._segmenter.segment_payload(transmission, encrypt)
                 for packet in packets:
-                    if not self._client:
-                        raise SesameConnectionError("Not connected")
                     await self._client.write_gatt_char(TX_CHAR_UUID, packet, response=False)
                 return b""
 
@@ -551,13 +554,14 @@ class SesameDevice:
             self._pending_responses[item_code] = fut
 
             try:
-                packets = self._segmenter.segment_payload(transmission, encrypt)
                 for packet in packets:
-                    if not self._client:
-                        raise SesameConnectionError("Not connected")
                     await self._client.write_gatt_char(TX_CHAR_UUID, packet, response=False)
-
                 return await asyncio.wait_for(fut, timeout=5.0)
+            except TimeoutError as err:
+                self._pending_responses.pop(item_code, None)
+                raise SesameCommandError(
+                    f"Timeout waiting for response to item {item_code}", error_code=-1
+                ) from err
             except asyncio.CancelledError as err:
                 self._pending_responses.pop(item_code, None)
                 raise SesameConnectionError("Command cancelled: connection lost") from err
@@ -601,6 +605,8 @@ class SesameLock(SesameDevice):
             self.is_battery_critical = bool(flags & 0x20)
 
             self.mech_status = self
+            if not self._login_event.is_set():
+                self._login_event.set()
 
             if self._status_cb:
                 self._status_cb(self, self)
@@ -730,8 +736,8 @@ class SesameLock(SesameDevice):
                 records.append(record)
                 await self.send_command(ITEM_HISTORY_DELETE, payload[0:4], encrypt=True)
 
-            except Exception as e:
-                if "Command error code: 5" in str(e):
+            except SesameCommandError as e:
+                if e.error_code == 5:
                     # 5 = CMD_RESULT_NOT_FOUND (queue empty)
                     break
                 logger.exception("Error during history fetch/flush loop: %s", e)
@@ -740,59 +746,7 @@ class SesameLock(SesameDevice):
         return records
 
 
-class BaseKeypad:
-    """Generic interface/base class representing a keypad device."""
-
-    def __init__(self) -> None:
-        self.passcodes: dict[str, dict[str, Any]] = {}
-        self.cards: dict[str, dict[str, Any]] = {}
-        self.fingerprints: dict[str, dict[str, Any]] = {}
-        self.cards_count = 0
-        self.fingerprints_count = 0
-        self.passcodes_count = 0
-
-    async def get_passcodes(self) -> dict[str, dict[str, Any]]:
-        """Fetch/sync passcodes from the keypad."""
-        raise NotImplementedError
-
-    async def add_passcode(self, code: str, name: str) -> None:
-        """Add a new passcode to the keypad."""
-        raise NotImplementedError
-
-    async def delete_passcode(self, code_or_id: str) -> None:
-        """Delete an existing passcode from the keypad."""
-        raise NotImplementedError
-
-    async def update_passcode_name(self, code_or_id: str, name: str) -> None:
-        """Update the nickname of an existing passcode on the keypad."""
-        raise NotImplementedError
-
-    async def get_cards(self) -> dict[str, dict[str, Any]]:
-        """Fetch/sync NFC cards from the keypad."""
-        raise NotImplementedError
-
-    async def delete_card(self, card_id: str) -> None:
-        """Delete a card from the keypad."""
-        raise NotImplementedError
-
-    async def update_card_name(self, card_id: str, name: str) -> None:
-        """Update the nickname of an existing card on the keypad."""
-        raise NotImplementedError
-
-    async def get_fingerprints(self) -> dict[str, dict[str, Any]]:
-        """Fetch/sync fingerprints from the keypad."""
-        raise NotImplementedError
-
-    async def delete_fingerprint(self, finger_id: str) -> None:
-        """Delete a fingerprint from the keypad."""
-        raise NotImplementedError
-
-    async def update_fingerprint_name(self, finger_id: str, name: str) -> None:
-        """Update the nickname of an existing fingerprint on the keypad."""
-        raise NotImplementedError
-
-
-class SesameKeypad(SesameDevice, BaseKeypad):
+class SesameKeypad(SesameDevice):
     """Subclass representing a Sesame Touch, Touch Pro, Face, or Face Pro keypad."""
 
     def __init__(
@@ -803,24 +757,31 @@ class SesameKeypad(SesameDevice, BaseKeypad):
         status_callback: Callable[[object, object], None] | None = None,
         reconnect_attempts: int = 0,
     ) -> None:
-        SesameDevice.__init__(
-            self,
+        super().__init__(
             ble_device,
             ad_data,
-            secret_key,
-            status_callback,
-            reconnect_attempts,
+            secret_key=secret_key,
+            status_callback=status_callback,
+            reconnect_attempts=reconnect_attempts,
         )
-        BaseKeypad.__init__(self)
+        self.passcodes: dict[str, dict[str, Any]] = {}
+        self.cards: dict[str, dict[str, Any]] = {}
+        self.fingerprints: dict[str, dict[str, Any]] = {}
+        self.faces: dict[str, dict[str, Any]] = {}
+        self.palms: dict[str, dict[str, Any]] = {}
+
+        self.cards_count = 0
+        self.fingerprints_count = 0
+        self.passcodes_count = 0
+        self.faces_count = 0
+        self.palms_count = 0
+
         self._temp_passcodes: dict[str, dict[str, Any]] = {}
         self._temp_cards: dict[str, dict[str, Any]] = {}
         self._temp_fingerprints: dict[str, dict[str, Any]] = {}
         self._temp_faces: dict[str, dict[str, Any]] = {}
         self._temp_palms: dict[str, dict[str, Any]] = {}
-        self.faces: dict[str, dict[str, Any]] = {}
-        self.palms: dict[str, dict[str, Any]] = {}
-        self.faces_count = 0
-        self.palms_count = 0
+
         self._sync_future: asyncio.Future[bool] | None = None
         self.scanned_fingerprint: dict[str, Any] | None = None
         self.scanned_passcode: dict[str, Any] | None = None
@@ -828,6 +789,7 @@ class SesameKeypad(SesameDevice, BaseKeypad):
         self.scanned_face: dict[str, Any] | None = None
         self.scanned_palm: dict[str, Any] | None = None
         self.paired_locks: list[dict[str, Any]] = []
+
         self.card_registration_mode = False
         self.fingerprint_registration_mode = False
         self.passcode_registration_mode = False
@@ -846,27 +808,11 @@ class SesameKeypad(SesameDevice, BaseKeypad):
                 raw_battery, cards, fingerprints, passwords, flags = struct.unpack(
                     "<HhBBB", payload
                 )
-            elif len(payload) == 9:
+            elif len(payload) >= 9:
                 model_id = getattr(getattr(self, "ad_data", None), "model_id", None) or getattr(
                     self, "product_model", None
                 )
-                if isinstance(model_id, str) and model_id in ProductModels.__members__:
-                    model_id = ProductModels[model_id].value
-                if model_id in (18, 19, 22, 23, 25, 26, 27, 28, 30, 31):
-                    raw_battery, cards, fingerprints, passwords, faces, palms, flags = (
-                        struct.unpack("<HhBBBBB", payload)
-                    )
-                else:
-                    raw_battery, cards, fingerprints, passwords, flags = struct.unpack(
-                        "<HhhhB", payload
-                    )
-            else:
-                model_id = getattr(getattr(self, "ad_data", None), "model_id", None) or getattr(
-                    self, "product_model", None
-                )
-                if isinstance(model_id, str) and model_id in ProductModels.__members__:
-                    model_id = ProductModels[model_id].value
-                if model_id in (18, 19, 22, 23, 25, 26, 27, 28, 30, 31):
+                if is_face_keypad_model(model_id):
                     raw_battery, cards, fingerprints, passwords, faces, palms, flags = (
                         struct.unpack("<HhBBBBB", payload[:9])
                     )
@@ -874,6 +820,8 @@ class SesameKeypad(SesameDevice, BaseKeypad):
                     raw_battery, cards, fingerprints, passwords, flags = struct.unpack(
                         "<HhhhB", payload[:9]
                     )
+            else:
+                return
 
             self.battery_voltage = raw_battery * 2 / 1000
             self.battery_percentage = calculate_battery_percentage(self.battery_voltage)
@@ -1032,25 +980,48 @@ class SesameKeypad(SesameDevice, BaseKeypad):
                     if self._status_cb:
                         self._status_cb(self, self)
 
-    async def get_passcodes(self) -> dict[str, dict[str, Any]]:
-        """Syncs the passcode database from the keypad and returns it."""
+    async def _sync_credentials(
+        self, cmd: int, count: int, temp_attr: str, final_attr: str
+    ) -> dict[str, dict[str, Any]]:
         if not self.is_logged_in:
             raise SesameAuthenticationError("Device is not logged in")
-
-        if getattr(self, "passcodes_count", 0) == 0:
-            self.passcodes = {}
-            return self.passcodes
+        if count == 0:
+            setattr(self, final_attr, {})
+            return getattr(self, final_attr)
 
         fut = self._sync_future = asyncio.get_running_loop().create_future()
-        self._temp_passcodes = {}
-
+        setattr(self, temp_attr, {})
         try:
-            await self.send_command(ITEM_PASSCODE_GET, b"", encrypt=True, wait_for_response=False)
+            await self.send_command(cmd, b"", encrypt=True, wait_for_response=False)
             await asyncio.wait_for(fut, timeout=15.0)
-            return self.passcodes
+            return getattr(self, final_attr)
         finally:
             if self._sync_future is fut:
                 self._sync_future = None
+
+    async def _delete_credential(self, cmd: int, id_bytes: bytes) -> None:
+        if not self.is_logged_in:
+            raise SesameAuthenticationError("Device is not logged in")
+        await self.send_command(cmd, id_bytes, encrypt=True)
+
+    async def _update_credential_name(self, cmd: int, id_bytes: bytes, name: str) -> None:
+        if not self.is_logged_in:
+            raise SesameAuthenticationError("Device is not logged in")
+        name_bytes = name.encode("utf-8")[:20]
+        payload = bytes([len(id_bytes)]) + id_bytes + name_bytes
+        await self.send_command(cmd, payload, encrypt=True)
+
+    async def _set_mode(self, cmd: int, active: bool) -> None:
+        if not self.is_logged_in:
+            raise SesameAuthenticationError("Device is not logged in")
+        mode = 0x01 if active else 0x00
+        await self.send_command(cmd, bytes([mode]), encrypt=True)
+
+    async def get_passcodes(self) -> dict[str, dict[str, Any]]:
+        """Syncs the passcode database from the keypad and returns it."""
+        return await self._sync_credentials(
+            ITEM_PASSCODE_GET, self.passcodes_count, "_temp_passcodes", "passcodes"
+        )
 
     def _resolve_code(self, code_or_id: str) -> bytes:
         code_str = str(code_or_id).strip()
@@ -1102,19 +1073,13 @@ class SesameKeypad(SesameDevice, BaseKeypad):
 
     async def delete_passcode(self, code_or_id: str) -> None:
         """Deletes a passcode PIN or Hex ID from the keypad."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        id_bytes = self._resolve_code(code_or_id)
-        await self.send_command(ITEM_PASSCODE_DELETE, id_bytes, encrypt=True)
+        await self._delete_credential(ITEM_PASSCODE_DELETE, self._resolve_code(code_or_id))
 
     async def update_passcode_name(self, code_or_id: str, name: str) -> None:
         """Updates the nickname of an existing passcode."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        id_bytes = self._resolve_code(code_or_id)
-        name_bytes = name.encode("utf-8")[:20]
-        payload = bytes([len(id_bytes)]) + id_bytes + name_bytes
-        await self.send_command(ITEM_PASSCODE_CHANGE, payload, encrypt=True)
+        await self._update_credential_name(
+            ITEM_PASSCODE_CHANGE, self._resolve_code(code_or_id), name
+        )
 
     def _parse_notify_payload(
         self, payload: bytes, is_passcode: bool = False
@@ -1159,38 +1124,15 @@ class SesameKeypad(SesameDevice, BaseKeypad):
 
     async def get_cards(self) -> dict[str, dict[str, Any]]:
         """Syncs the card database from the keypad and returns it."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-
-        if getattr(self, "cards_count", 0) == 0:
-            self.cards = {}
-            return self.cards
-
-        fut = self._sync_future = asyncio.get_running_loop().create_future()
-        self._temp_cards = {}
-
-        try:
-            await self.send_command(ITEM_CARD_GET, b"", encrypt=True, wait_for_response=False)
-            await asyncio.wait_for(fut, timeout=15.0)
-            return self.cards
-        finally:
-            if self._sync_future is fut:
-                self._sync_future = None
+        return await self._sync_credentials(ITEM_CARD_GET, self.cards_count, "_temp_cards", "cards")
 
     async def delete_card(self, card_id: str) -> None:
         """Deletes a card from the keypad."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        await self.send_command(ITEM_CARD_DELETE, bytes.fromhex(card_id), encrypt=True)
+        await self._delete_credential(ITEM_CARD_DELETE, bytes.fromhex(card_id))
 
     async def update_card_name(self, card_id: str, name: str) -> None:
         """Updates the nickname of an existing card."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        id_bytes = bytes.fromhex(card_id)
-        name_bytes = name.encode("utf-8")[:20]
-        payload = bytes([len(id_bytes)]) + id_bytes + name_bytes
-        await self.send_command(ITEM_CARD_CHANGE, payload, encrypt=True)
+        await self._update_credential_name(ITEM_CARD_CHANGE, bytes.fromhex(card_id), name)
 
     async def add_card(self, card_id: str, name: str, card_type: int = 0x80) -> None:
         """Registers/Adds a card to the keypad database."""
@@ -1211,147 +1153,65 @@ class SesameKeypad(SesameDevice, BaseKeypad):
 
     async def get_fingerprints(self) -> dict[str, dict[str, Any]]:
         """Syncs the fingerprint database from the keypad and returns it."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-
-        if getattr(self, "fingerprints_count", 0) == 0:
-            self.fingerprints = {}
-            return self.fingerprints
-
-        fut = self._sync_future = asyncio.get_running_loop().create_future()
-        self._temp_fingerprints = {}
-
-        try:
-            await self.send_command(ITEM_FINGER_GET, b"", encrypt=True, wait_for_response=False)
-            await asyncio.wait_for(fut, timeout=15.0)
-            return self.fingerprints
-        finally:
-            if self._sync_future is fut:
-                self._sync_future = None
+        return await self._sync_credentials(
+            ITEM_FINGER_GET, self.fingerprints_count, "_temp_fingerprints", "fingerprints"
+        )
 
     async def delete_fingerprint(self, finger_id: str) -> None:
         """Deletes a fingerprint from the keypad."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        await self.send_command(ITEM_FINGER_DELETE, bytes.fromhex(finger_id), encrypt=True)
+        await self._delete_credential(ITEM_FINGER_DELETE, bytes.fromhex(finger_id))
 
     async def update_fingerprint_name(self, finger_id: str, name: str) -> None:
         """Updates the nickname of an existing fingerprint."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        id_bytes = bytes.fromhex(finger_id)
-        name_bytes = name.encode("utf-8")[:20]
-        payload = bytes([len(id_bytes)]) + id_bytes + name_bytes
-        await self.send_command(ITEM_FINGER_CHANGE, payload, encrypt=True)
+        await self._update_credential_name(ITEM_FINGER_CHANGE, bytes.fromhex(finger_id), name)
 
     async def set_card_registration_mode(self, active: bool) -> None:
         """Sets the keypad card mode: True for Add Mode, False for Verification Mode."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        mode = 0x01 if active else 0x00
-        await self.send_command(ITEM_CARD_MODE_SET, bytes([mode]), encrypt=True)
+        await self._set_mode(ITEM_CARD_MODE_SET, active)
         self.card_registration_mode = active
 
     async def set_fingerprint_registration_mode(self, active: bool) -> None:
         """Sets the keypad fingerprint mode: True for Add Mode, False for Verification Mode."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        mode = 0x01 if active else 0x00
-        await self.send_command(ITEM_FINGER_MODE_SET, bytes([mode]), encrypt=True)
+        await self._set_mode(ITEM_FINGER_MODE_SET, active)
         self.fingerprint_registration_mode = active
 
     async def set_passcode_registration_mode(self, active: bool) -> None:
         """Sets the keypad passcode mode: True for Add Mode, False for Verification Mode."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        mode = 0x01 if active else 0x00
-        await self.send_command(ITEM_PASSCODE_MODE_SET, bytes([mode]), encrypt=True)
+        await self._set_mode(ITEM_PASSCODE_MODE_SET, active)
         self.passcode_registration_mode = active
 
     async def get_faces(self) -> dict[str, dict[str, Any]]:
         """Syncs the face database from the keypad and returns it."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-
-        if getattr(self, "faces_count", 0) == 0:
-            self.faces = {}
-            return self.faces
-
-        fut = self._sync_future = asyncio.get_running_loop().create_future()
-        self._temp_faces = {}
-
-        try:
-            await self.send_command(ITEM_FACE_GET, b"", encrypt=True, wait_for_response=False)
-            await asyncio.wait_for(fut, timeout=15.0)
-            return self.faces
-        finally:
-            if self._sync_future is fut:
-                self._sync_future = None
+        return await self._sync_credentials(ITEM_FACE_GET, self.faces_count, "_temp_faces", "faces")
 
     async def delete_face(self, face_id: str) -> None:
         """Deletes a face from the keypad."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        await self.send_command(ITEM_FACE_DELETE, bytes.fromhex(face_id), encrypt=True)
+        await self._delete_credential(ITEM_FACE_DELETE, bytes.fromhex(face_id))
 
     async def update_face_name(self, face_id: str, name: str) -> None:
         """Updates the nickname of an existing face."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        id_bytes = bytes.fromhex(face_id)
-        name_bytes = name.encode("utf-8")[:20]
-        payload = bytes([len(id_bytes)]) + id_bytes + name_bytes
-        await self.send_command(ITEM_FACE_CHANGE, payload, encrypt=True)
+        await self._update_credential_name(ITEM_FACE_CHANGE, bytes.fromhex(face_id), name)
 
     async def set_face_registration_mode(self, active: bool) -> None:
         """Sets the keypad face mode: True for Add Mode, False for Verification Mode."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        mode = 0x01 if active else 0x00
-        await self.send_command(ITEM_FACE_MODE_SET, bytes([mode]), encrypt=True)
+        await self._set_mode(ITEM_FACE_MODE_SET, active)
         self.face_registration_mode = active
 
     async def get_palms(self) -> dict[str, dict[str, Any]]:
         """Syncs the palm database from the keypad and returns it."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-
-        if getattr(self, "palms_count", 0) == 0:
-            self.palms = {}
-            return self.palms
-
-        fut = self._sync_future = asyncio.get_running_loop().create_future()
-        self._temp_palms = {}
-
-        try:
-            await self.send_command(ITEM_PALM_GET, b"", encrypt=True, wait_for_response=False)
-            await asyncio.wait_for(fut, timeout=15.0)
-            return self.palms
-        finally:
-            if self._sync_future is fut:
-                self._sync_future = None
+        return await self._sync_credentials(ITEM_PALM_GET, self.palms_count, "_temp_palms", "palms")
 
     async def delete_palm(self, palm_id: str) -> None:
         """Deletes a palm from the keypad."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        await self.send_command(ITEM_PALM_DELETE, bytes.fromhex(palm_id), encrypt=True)
+        await self._delete_credential(ITEM_PALM_DELETE, bytes.fromhex(palm_id))
 
     async def update_palm_name(self, palm_id: str, name: str) -> None:
         """Updates the nickname of an existing palm."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        id_bytes = bytes.fromhex(palm_id)
-        name_bytes = name.encode("utf-8")[:20]
-        payload = bytes([len(id_bytes)]) + id_bytes + name_bytes
-        await self.send_command(ITEM_PALM_CHANGE, payload, encrypt=True)
+        await self._update_credential_name(ITEM_PALM_CHANGE, bytes.fromhex(palm_id), name)
 
     async def set_palm_registration_mode(self, active: bool) -> None:
         """Sets the keypad palm mode: True for Add Mode, False for Verification Mode."""
-        if not self.is_logged_in:
-            raise SesameAuthenticationError("Device is not logged in")
-        mode = 0x01 if active else 0x00
-        await self.send_command(ITEM_PALM_MODE_SET, bytes([mode]), encrypt=True)
+        await self._set_mode(ITEM_PALM_MODE_SET, active)
         self.palm_registration_mode = active
 
     def _parse_paired_locks(self, payload: bytes) -> None:
@@ -1459,10 +1319,17 @@ def create_sesame_device(
     ad_data: SesameAdData | None = None,
     secret_key: str | bytes | None = None,
     **kwargs: Any,
-) -> SesameLock | SesameKeypad:
+) -> SesameDevice:
     """Factory function to instantiate the appropriate Sesame device class."""
-    if ad_data and is_keypad_model(ad_data.model_id):
-        return SesameKeypad(ble_device, ad_data, secret_key=secret_key, **kwargs)
+    if ad_data:
+        if is_keypad_model(ad_data.model_id):
+            return SesameKeypad(ble_device, ad_data, secret_key=secret_key, **kwargs)
+        if is_bot_model(ad_data.model_id):
+            return SesameBot(ble_device, ad_data, secret_key=secret_key, **kwargs)
+        if is_open_sensor_model(ad_data.model_id):
+            return SesameOpenSensor(ble_device, ad_data, secret_key=secret_key, **kwargs)
+        if is_bike_lock_model(ad_data.model_id):
+            return SesameBikeLock(ble_device, ad_data, secret_key=secret_key, **kwargs)
     return SesameLock(ble_device, ad_data, secret_key=secret_key, **kwargs)
 
 
@@ -1489,9 +1356,11 @@ async def scan_sesame_devices(
             pass
 
     scanner = BleakScanner(detection_callback=detection_callback)
-    await scanner.start()
-    await asyncio.sleep(timeout)
-    await scanner.stop()
+    try:
+        await scanner.start()
+        await asyncio.sleep(timeout)
+    finally:
+        await scanner.stop()
     return found_devices
 
 
@@ -1500,34 +1369,34 @@ async def find_sesame_device(
     timeout: float = 5.0,
 ) -> tuple[BLEDevice, SesameAdData | None] | None:
     """Find a specific Sesame BLE device by MAC address."""
-    scanner = BleakScanner()
-    await scanner.start()
     target_addr = address.upper()
-    ble_device: BLEDevice | None = None
-    ad_data: SesameAdData | None = None
+    found_event = asyncio.Event()
+    found_ble_device: BLEDevice | None = None
+    found_ad_data: SesameAdData | None = None
 
-    for _ in range(int(timeout * 10)):
-        for addr, (dev, adv) in scanner.discovered_devices_and_advertisement_data.items():
-            if addr.upper() == target_addr:
-                ble_device = dev
-                if adv.manufacturer_data:
-                    mfg = get_sesame_mfg_data(adv.manufacturer_data)
-                    if mfg:
-                        try:
-                            ad_data = SesameAdData.decode(mfg[1])
-                        except Exception:
-                            pass
-                break
-        if ble_device:
-            break
-        await asyncio.sleep(0.1)
+    def detection_callback(device: BLEDevice, adv: Any) -> None:
+        nonlocal found_ble_device, found_ad_data
+        if device.address.upper() == target_addr:
+            found_ble_device = device
+            if adv.manufacturer_data:
+                mfg = get_sesame_mfg_data(adv.manufacturer_data)
+                if mfg:
+                    with contextlib.suppress(Exception):
+                        found_ad_data = SesameAdData.decode(mfg[1])
+            found_event.set()
 
-    await scanner.stop()
+    scanner = BleakScanner(detection_callback=detection_callback)
+    try:
+        await scanner.start()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(found_event.wait(), timeout=timeout)
+    finally:
+        await scanner.stop()
 
-    if not ble_device:
-        ble_device = await BleakScanner.find_device_by_address(address, timeout=timeout)
+    if not found_ble_device:
+        found_ble_device = await BleakScanner.find_device_by_address(address, timeout=timeout)
 
-    if not ble_device:
+    if not found_ble_device:
         return None
 
-    return ble_device, ad_data
+    return found_ble_device, found_ad_data

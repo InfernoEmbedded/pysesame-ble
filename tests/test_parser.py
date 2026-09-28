@@ -51,3 +51,9 @@ def test_qr_code_short_payload() -> None:
     short_b64 = "AQIDBA=="  # 4 bytes decoded
     with pytest.raises(SesameKeyError, match="too short"):
         SesameQRCode.from_url(f"ssm://UI?t=sk&sk={short_b64}")
+
+
+def test_qr_code_invalid_key_level() -> None:
+    """Test that non-numeric key level raises SesameKeyError."""
+    with pytest.raises(SesameKeyError, match="Invalid key level"):
+        SesameQRCode.from_url("ssm://UI?t=sk&sk=AQIDBA==&l=not_a_number")

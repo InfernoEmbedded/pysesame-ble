@@ -29,7 +29,6 @@ class SesameCipher:
             session_key: 16-byte session key (Token derived via AES-CMAC).
         """
         self._token = session_token
-        self._key = session_key
         self._encrypt_seq = 0
         self._decrypt_seq = 0
         self._aesccm = AESCCM(session_key, tag_length=4)

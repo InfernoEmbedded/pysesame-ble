@@ -79,7 +79,6 @@ from .crypto import (
     generate_ecc_keypair,
 )
 from .device import (
-    BaseKeypad,
     SesameBikeLock,
     SesameBot,
     SesameDevice,
@@ -99,6 +98,7 @@ from .exceptions import (
     SesameRegistrationError,
 )
 from .models import (
+    FACE_KEYPAD_MODELS,
     KeypadMechStatus,
     ProductModels,
     SesameAdData,
@@ -107,6 +107,7 @@ from .models import (
     get_sesame_mfg_data,
     is_bike_lock_model,
     is_bot_model,
+    is_face_keypad_model,
     is_keypad_model,
     is_lock_model,
     is_open_sensor_model,
@@ -116,6 +117,7 @@ from .parser import SesameQRCode
 __all__ = [
     "COMPANY_ID",
     "COMPANY_IDS",
+    "FACE_KEYPAD_MODELS",
     "ITEM_ADD_SESAME",
     "ITEM_AUTOLOCK",
     "ITEM_CARD_ADD",
@@ -183,7 +185,6 @@ __all__ = [
     "RX_CHAR_UUID",
     "SERVICE_UUID",
     "TX_CHAR_UUID",
-    "BaseKeypad",
     "KeypadMechStatus",
     "ProductModels",
     "SesameAdData",
@@ -212,6 +213,7 @@ __all__ = [
     "get_sesame_mfg_data",
     "is_bike_lock_model",
     "is_bot_model",
+    "is_face_keypad_model",
     "is_keypad_model",
     "is_lock_model",
     "is_open_sensor_model",

@@ -26,7 +26,11 @@ from pysesame_ble.device import (
     SesameSegmentLayer,
     create_sesame_device,
 )
-from pysesame_ble.exceptions import SesameAuthenticationError
+from pysesame_ble.exceptions import (
+    SesameAuthenticationError,
+    SesameCommandError,
+    SesameConnectionError,
+)
 from pysesame_ble.models import ProductModels, SesameAdData
 
 TEST_UUID = UUID("01234567-89ab-cdef-0123-456789abcdef")
@@ -83,15 +87,26 @@ def test_create_sesame_device_factory() -> None:
     keypad_ad = SesameAdData(
         model_id=ProductModels.SESAME_TOUCH_PRO.value, is_registered=True, device_uuid=TEST_UUID
     )
+    bot_ad = SesameAdData(
+        model_id=ProductModels.SESAME_BOT1.value, is_registered=True, device_uuid=TEST_UUID
+    )
+    sensor_ad = SesameAdData(
+        model_id=ProductModels.SESAME_OPEN_SENSOR1.value, is_registered=True, device_uuid=TEST_UUID
+    )
+    bike_ad = SesameAdData(
+        model_id=ProductModels.SESAME_BIKE2.value, is_registered=True, device_uuid=TEST_UUID
+    )
 
     mock_ble = MagicMock()
     mock_ble.address = "AA:BB:CC:DD:EE:FF"
 
-    lock_dev = create_sesame_device(mock_ble, lock_ad, secret_key="00" * 16)
-    assert isinstance(lock_dev, SesameLock)
-
-    keypad_dev = create_sesame_device(mock_ble, keypad_ad, secret_key="00" * 16)
-    assert isinstance(keypad_dev, SesameKeypad)
+    assert isinstance(create_sesame_device(mock_ble, lock_ad, secret_key="00" * 16), SesameLock)
+    assert isinstance(create_sesame_device(mock_ble, keypad_ad, secret_key="00" * 16), SesameKeypad)
+    assert isinstance(create_sesame_device(mock_ble, bot_ad, secret_key="00" * 16), SesameBot)
+    assert isinstance(
+        create_sesame_device(mock_ble, sensor_ad, secret_key="00" * 16), SesameOpenSensor
+    )
+    assert isinstance(create_sesame_device(mock_ble, bike_ad, secret_key="00" * 16), SesameLock)
 
 
 @pytest.mark.asyncio
@@ -267,3 +282,49 @@ def test_device_pause_auto_reconnect() -> None:
 
     dev.resume_auto_reconnect()
     assert dev._auto_reconnect_paused is False
+
+
+def test_device_set_ble_device_and_fw_alias() -> None:
+    """Test updating the BLEDevice reference and fw_version alias."""
+    mock_ble_1 = MagicMock()
+    mock_ble_1.address = "AA:BB:CC:DD:EE:11"
+    dev = SesameDevice(mock_ble_1)
+    assert dev.address == "AA:BB:CC:DD:EE:11"
+    assert dev.fw_version is None
+
+    mock_ble_2 = MagicMock()
+    mock_ble_2.address = "AA:BB:CC:DD:EE:22"
+    dev.set_ble_device(mock_ble_2)
+    assert dev.address == "AA:BB:CC:DD:EE:22"
+
+    dev._firmware_version = "3.5.1"
+    assert dev.fw_version == "3.5.1"
+    assert dev.firmware_version == "3.5.1"
+
+
+@pytest.mark.asyncio
+async def test_connect_missing_ble_device_error() -> None:
+    """Test that connecting without a BLE device raises SesameConnectionError."""
+    dev = SesameDevice(None)
+    with pytest.raises(SesameConnectionError, match="No BLEDevice configured"):
+        await dev.connect()
+
+
+def test_on_gatt_notification_error_code() -> None:
+    """Test that GATT notification with non-zero result code sets error_code."""
+    mock_ble = MagicMock()
+    mock_ble.address = "AA:BB:CC:DD:EE:FF"
+    dev = SesameDevice(mock_ble)
+
+    fut = MagicMock()
+    fut.done.return_value = False
+    dev._pending_responses[82] = fut
+
+    # Response payload: OP_RESPONSE (7), item_code (82), result_code (5)
+    raw_packet = bytes([0x03, 0x07, 82, 5])
+    dev._on_gatt_notification(MagicMock(), bytearray(raw_packet))
+
+    fut.set_exception.assert_called_once()
+    exc = fut.set_exception.call_args[0][0]
+    assert isinstance(exc, SesameCommandError)
+    assert exc.error_code == 5

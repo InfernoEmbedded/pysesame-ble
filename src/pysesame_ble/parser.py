@@ -31,11 +31,12 @@ class SesameQRCode:
         if not sk_str:
             raise SesameKeyError("QR URL is missing secret key 'sk' parameter")
 
-        missing_padding = len(sk_str) % 4
-        if missing_padding:
-            sk_str += "=" * (4 - missing_padding)
+        sk_str += "=" * (-len(sk_str) % 4)
 
-        key_level = int(params.get("l", "0"))
+        try:
+            key_level = int(params.get("l", "0"))
+        except ValueError as err:
+            raise SesameKeyError(f"Invalid key level in QR URL: {err}") from err
         device_name = params.get("n", "")
 
         try:

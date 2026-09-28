@@ -45,86 +45,73 @@ class ProductModels(IntEnum):
     SESAME_OPEN_SENSOR2 = 34
 
 
+FACE_KEYPAD_MODELS = (
+    ProductModels.SESAME_FACE_PRO.value,
+    ProductModels.SESAME_FACE.value,
+    ProductModels.SESAME_FACE_PRO_AI.value,
+    ProductModels.SESAME_FACE_AI.value,
+    ProductModels.SESAME_TOUCH_2.value,
+    ProductModels.SESAME_TOUCH_2_PRO.value,
+    ProductModels.SESAME_FACE_2.value,
+    ProductModels.SESAME_FACE_2_PRO.value,
+    ProductModels.SESAME_FACE_2_AI.value,
+    ProductModels.SESAME_FACE_2_PRO_AI.value,
+)
+
+
+def _model_name(model: str | int | ProductModels | None) -> str | None:
+    if model is None:
+        return None
+    if isinstance(model, ProductModels):
+        return model.name.upper()
+    if isinstance(model, int):
+        try:
+            return ProductModels(model).name.upper()
+        except ValueError:
+            return None
+    return str(model).upper()
+
+
+def is_face_keypad_model(model: str | int | ProductModels | None) -> bool:
+    """Return True if model is a Face or 2nd-gen biometric keypad."""
+    if isinstance(model, ProductModels):
+        return model.value in FACE_KEYPAD_MODELS
+    if isinstance(model, int):
+        return model in FACE_KEYPAD_MODELS
+    name = _model_name(model)
+    return bool(name and any(k in name for k in ("FACE", "TOUCH_2")))
+
+
 def is_keypad_model(model: str | int | ProductModels | None) -> bool:
     """Return True if model is a keypad/touch/face device."""
-    if model is None:
-        return False
-    if isinstance(model, ProductModels):
-        name = model.name
-    elif isinstance(model, int):
-        try:
-            name = ProductModels(model).name
-        except ValueError:
-            return False
-    else:
-        name = str(model)
-    name_upper = name.upper()
-    return any(k in name_upper for k in ("TOUCH", "FACE", "AI", "KEYPAD"))
+    name = _model_name(model)
+    return bool(name and any(k in name for k in ("TOUCH", "FACE", "AI", "KEYPAD")))
 
 
 def is_lock_model(model: str | int | ProductModels | None) -> bool:
     """Return True if model is a smart lock or bike lock."""
-    if model is None:
-        return False
-    if isinstance(model, ProductModels):
-        name = model.name
-    elif isinstance(model, int):
-        try:
-            name = ProductModels(model).name
-        except ValueError:
-            return False
-    else:
-        name = str(model)
-    name_upper = name.upper()
-    return any(k in name_upper for k in ("SESAME", "LOCK", "BIKE")) and not is_keypad_model(model)
+    name = _model_name(model)
+    return bool(
+        name and any(k in name for k in ("SESAME", "LOCK", "BIKE")) and not is_keypad_model(model)
+    )
 
 
 def is_bot_model(model: str | int | ProductModels | None) -> bool:
     """Return True if model is a Sesame Bot switch pusher."""
-    if model is None:
-        return False
-    if isinstance(model, ProductModels):
-        name = model.name
-    elif isinstance(model, int):
-        try:
-            name = ProductModels(model).name
-        except ValueError:
-            return False
-    else:
-        name = str(model)
-    return "BOT" in name.upper()
+    name = _model_name(model)
+    return bool(name and "BOT" in name)
 
 
 def is_open_sensor_model(model: str | int | ProductModels | None) -> bool:
     """Return True if model is a Sesame Open Sensor door/window contact."""
-    if model is None:
-        return False
-    if isinstance(model, ProductModels):
-        name = model.name
-    elif isinstance(model, int):
-        try:
-            name = ProductModels(model).name
-        except ValueError:
-            return False
-    else:
-        name = str(model)
-    return "OPEN_SENSOR" in name.upper()
+    name = _model_name(model)
+    return bool(name and "OPEN_SENSOR" in name)
 
 
 def is_bike_lock_model(model: str | int | ProductModels | None) -> bool:
     """Return True if model is a Sesame Bike Lock."""
-    if model is None:
-        return False
-    if isinstance(model, ProductModels):
-        name = model.name
-    elif isinstance(model, int):
-        try:
-            name = ProductModels(model).name
-        except ValueError:
-            return False
-    else:
-        name = str(model)
-    return "BIKE" in name.upper()
+    name = _model_name(model)
+    return bool(name and "BIKE" in name)
 
 
 def get_sesame_mfg_data(mfg_dict: dict[int, bytes]) -> tuple[int, bytes] | None:
@@ -185,13 +172,15 @@ def calculate_battery_percentage(voltage: float) -> int:
         return int(BATTERY_PERCENTAGES[0])
     if voltage <= VOLTAGE_LEVELS[-1]:
         return int(BATTERY_PERCENTAGES[-1])
-    for i in range(len(VOLTAGE_LEVELS) - 1):
-        upper_v = VOLTAGE_LEVELS[i]
-        lower_v = VOLTAGE_LEVELS[i + 1]
+    for upper_v, lower_v, upper_p, lower_p in zip(
+        VOLTAGE_LEVELS,
+        VOLTAGE_LEVELS[1:],
+        BATTERY_PERCENTAGES,
+        BATTERY_PERCENTAGES[1:],
+        strict=True,
+    ):
         if lower_v < voltage <= upper_v:
             ratio = (voltage - lower_v) / (upper_v - lower_v)
-            upper_p = BATTERY_PERCENTAGES[i]
-            lower_p = BATTERY_PERCENTAGES[i + 1]
             return int((upper_p - lower_p) * ratio + lower_p)
     return 0
 

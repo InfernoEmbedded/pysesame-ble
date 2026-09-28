@@ -13,6 +13,7 @@ from pysesame_ble.models import (
     get_sesame_mfg_data,
     is_bike_lock_model,
     is_bot_model,
+    is_face_keypad_model,
     is_keypad_model,
     is_lock_model,
     is_open_sensor_model,
@@ -44,6 +45,11 @@ def test_model_detection_helpers() -> None:
     assert is_bike_lock_model(ProductModels.SESAME_BIKE2) is True
     assert is_bike_lock_model(ProductModels.SESAME_BIKE3) is True
     assert is_bike_lock_model(ProductModels.SESAME5) is False
+
+    assert is_face_keypad_model(ProductModels.SESAME_FACE) is True
+    assert is_face_keypad_model(ProductModels.SESAME_FACE_PRO) is True
+    assert is_face_keypad_model(ProductModels.SESAME_TOUCH) is False
+    assert is_face_keypad_model(ProductModels.SESAME5) is False
 
 
 def test_calculate_battery_percentage() -> None:
