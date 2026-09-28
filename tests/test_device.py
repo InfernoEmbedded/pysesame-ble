@@ -271,8 +271,9 @@ async def test_sesame_bot_commands() -> None:
     bot.send_command.assert_awaited_once_with(ITEM_UNLOCK, b"", encrypt=True)
 
 
-def test_device_pause_auto_reconnect() -> None:
-    """Test pausing and resuming auto-reconnection."""
+@pytest.mark.asyncio
+async def test_device_pause_auto_reconnect() -> None:
+    """Test pausing and resuming auto-reconnection and pause on disconnect."""
     mock_ble = MagicMock()
     mock_ble.address = "AA:BB:CC:DD:EE:FF"
     dev = SesameDevice(mock_ble)
@@ -282,6 +283,9 @@ def test_device_pause_auto_reconnect() -> None:
 
     dev.resume_auto_reconnect()
     assert dev._auto_reconnect_paused is False
+
+    await dev.disconnect()
+    assert dev._auto_reconnect_paused is True
 
 
 def test_device_set_ble_device_and_fw_alias() -> None:

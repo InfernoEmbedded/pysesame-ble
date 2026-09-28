@@ -209,6 +209,7 @@ class SesameDevice:
         self._login_event = asyncio.Event()
         self._send_lock = asyncio.Lock()
 
+        self._session_token: bytes | None = None
         self._token_future: asyncio.Future[bytes] | None = None
         self._pending_responses: dict[int, asyncio.Future[bytes]] = {}
         self.is_logged_in = False
@@ -254,7 +255,6 @@ class SesameDevice:
             raise SesameConnectionError("Already connected")
 
         logger.info("Connecting to Sesame [address=%s]", self.address)
-        self._token_future = asyncio.get_running_loop().create_future()
 
         try:
             self._client = await establish_connection(
@@ -275,18 +275,19 @@ class SesameDevice:
                 raise SesameConnectionError(f"Connection failed: {err}") from err
 
         try:
+            self._token_future = asyncio.get_running_loop().create_future()
             await self._client.start_notify(RX_CHAR_UUID, self._on_gatt_notification)
             logger.debug("Waiting for session token publish")
-            if self._token_future is None:
-                raise SesameConnectionError("Disconnected before token received")
             await asyncio.wait_for(self._token_future, timeout=15.0)
         except Exception:
             await self.disconnect()
             raise
+        finally:
+            self._token_future = None
 
     async def register(self) -> str:
         """Performs cryptographic registration handshake and returns derived secret key hex."""
-        if not self._token_future or not self._token_future.done():
+        if not self._session_token:
             raise SesameRegistrationError("Session token not received yet")
 
         app_pub, app_priv = generate_ecc_keypair()
@@ -309,10 +310,10 @@ class SesameDevice:
             raise SesameAuthenticationError("Already logged in")
         if not self._secret:
             raise SesameAuthenticationError("Secret key is missing")
-        if not self._token_future or not self._token_future.done():
+        if not self._session_token:
             raise SesameAuthenticationError("Session token not received yet")
 
-        token = self._token_future.result()
+        token = self._session_token
         session_key = derive_session_token_key(self._secret, token)
         self._cipher = SesameCipher(token, session_key)
 
@@ -400,6 +401,7 @@ class SesameDevice:
 
     async def disconnect(self) -> None:
         """Gracefully disconnects and resets state."""
+        self.pause_auto_reconnect()
         self._reset_state()
         if self._client:
             try:
@@ -413,6 +415,7 @@ class SesameDevice:
         was_logged_in = self.is_logged_in
         self.is_logged_in = False
         self._cipher = None
+        self._session_token = None
         if self._token_future and not self._token_future.done():
             self._token_future.set_exception(
                 SesameConnectionError("Disconnected before handshake completed")
@@ -515,6 +518,7 @@ class SesameDevice:
                 publish_payload = body[1:]
 
                 if item_code == ITEM_INITIAL:
+                    self._session_token = publish_payload
                     if self._token_future and not self._token_future.done():
                         self._token_future.set_result(publish_payload)
                 else:
