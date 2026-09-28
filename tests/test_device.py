@@ -48,10 +48,10 @@ def test_segment_layer_segment_and_feed() -> None:
 
     # First packet starts with 0x01 (start)
     assert packets[0][0] & 0x01
-    # Last packet ends with 0x02 (end)
+    # Last packet ends with 0x02 (plaintext end)
     assert packets[-1][0] & 0x02
     # Not encrypted
-    assert not (packets[0][0] & 0x80)
+    assert not (packets[-1][0] & 0x04)
 
     # Reassemble
     result = None
@@ -59,24 +59,26 @@ def test_segment_layer_segment_and_feed() -> None:
         result = segmenter.feed_packet(p)
 
     assert result is not None
-    assembled_payload, _header, is_encrypted = result
+    assembled_payload, is_complete, is_encrypted = result
+    assert is_complete is True
     assert assembled_payload == original_payload
     assert is_encrypted is False
 
 
 def test_segment_layer_encrypted_flag() -> None:
-    """Test that encrypted packets carry bit 7 set."""
+    """Test that encrypted packets carry bit 2 set on end packet."""
     segmenter = SesameSegmentLayer()
     payload = b"Encrypted data packet"
     packets = segmenter.segment_payload(payload, encrypt=True)
-    assert packets[0][0] & 0x80
+    assert packets[-1][0] & 0x04
 
     result = None
     for p in packets:
         result = segmenter.feed_packet(p)
 
     assert result is not None
-    _, _, is_encrypted = result
+    _, is_complete, is_encrypted = result
+    assert is_complete is True
     assert is_encrypted is True
 
 

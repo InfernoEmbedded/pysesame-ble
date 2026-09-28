@@ -119,14 +119,16 @@ class SesameSegmentLayer:
     def __init__(self) -> None:
         self._rx_buffer = bytearray()
 
-    def feed_packet(self, data: bytes) -> tuple[bytes, int, bool] | None:
+    def feed_packet(self, data: bytes) -> tuple[bytes, bool, bool] | None:
         """Processes an incoming raw BLE GATT packet.
 
         Header bit layout:
-        Bit 0: Start of message (1 = start)
-        Bit 1: End of message (1 = end)
-        Bit 2..6: Reserved / Segment sequence
-        Bit 7: Encryption flag (1 = encrypted payload)
+        Bit 0 (0x01): Start of message (BEGINNING)
+        Bit 1 (0x02): End of plaintext message (PLAINTEXT_END)
+        Bit 2 (0x04): End of encrypted message (ENCRYPTED_END)
+
+        Returns:
+            A tuple of (message_payload, is_complete, is_encrypted) or None if incomplete.
         """
         if not data:
             return None
@@ -135,8 +137,9 @@ class SesameSegmentLayer:
         body = data[1:]
 
         is_start = bool(header & 0x01)
-        is_end = bool(header & 0x02)
-        is_encrypted = bool(header & 0x80)
+        is_plain_end = bool(header & 0x02)
+        is_crypt_end = bool(header & 0x04)
+        is_end = is_plain_end or is_crypt_end
 
         if is_start:
             self._rx_buffer.clear()
@@ -146,7 +149,7 @@ class SesameSegmentLayer:
         if is_end:
             full_payload = bytes(self._rx_buffer)
             self._rx_buffer.clear()
-            return full_payload, header, is_encrypted
+            return full_payload, True, is_crypt_end
 
         return None
 
@@ -166,9 +169,7 @@ class SesameSegmentLayer:
             if is_start:
                 header |= 0x01
             if is_end:
-                header |= 0x02
-            if encrypt:
-                header |= 0x80
+                header |= 0x04 if encrypt else 0x02
 
             packets.append(bytes([header]) + chunk)
             offset += chunk_size
@@ -741,8 +742,8 @@ class SesameLock(SesameDevice):
                 records.append(record)
                 await self.send_command(ITEM_HISTORY_DELETE, payload[0:4], encrypt=True)
 
-            except SesameCommandError as e:
-                if e.error_code == 5:
+            except Exception as e:
+                if (isinstance(e, SesameCommandError) and e.error_code == 5) or "5" in str(e):
                     # 5 = CMD_RESULT_NOT_FOUND (queue empty)
                     break
                 logger.exception("Error during history fetch/flush loop: %s", e)
