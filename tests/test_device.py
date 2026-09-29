@@ -372,4 +372,3 @@ def test_disconnect_callback() -> None:
     dev = SesameDevice(mock_ble, disconnect_callback=cb)
     dev._on_disconnect(MagicMock())
     cb.assert_called_once()
-
