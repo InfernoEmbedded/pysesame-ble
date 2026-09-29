@@ -186,6 +186,7 @@ class SesameDevice:
         ad_data: SesameAdData | None = None,
         secret_key: str | bytes | None = None,
         status_callback: Callable[[object, object], None] | None = None,
+        disconnect_callback: Callable[[], None] | None = None,
         reconnect_attempts: int = 0,
     ) -> None:
         self._ble_device = ble_device
@@ -201,6 +202,7 @@ class SesameDevice:
 
         self._reconnect_limit = reconnect_attempts
         self._status_cb = status_callback
+        self._disconnect_cb = disconnect_callback
 
         self._segmenter = SesameSegmentLayer()
         self._client: BleakClient | None = None
@@ -450,6 +452,11 @@ class SesameDevice:
         del client
         logger.warning("Sesame BLE disconnected unexpectedly [address=%s]", self.address)
         self._reset_state()
+        if self._disconnect_cb:
+            try:
+                self._disconnect_cb()
+            except Exception:
+                logger.exception("Error in disconnect callback")
         if (
             not self._auto_reconnect_paused
             and self._reconnect_limit
@@ -952,6 +959,7 @@ class SesameKeypad(SesameDevice, BaseKeypad):
         ad_data: SesameAdData | None = None,
         secret_key: str | bytes | None = None,
         status_callback: Callable[[object, object], None] | None = None,
+        disconnect_callback: Callable[[], None] | None = None,
         reconnect_attempts: int = 0,
     ) -> None:
         super().__init__(
@@ -959,6 +967,7 @@ class SesameKeypad(SesameDevice, BaseKeypad):
             ad_data,
             secret_key=secret_key,
             status_callback=status_callback,
+            disconnect_callback=disconnect_callback,
             reconnect_attempts=reconnect_attempts,
         )
         BaseKeypad.__init__(self)

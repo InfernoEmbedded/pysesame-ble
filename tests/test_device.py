@@ -362,3 +362,14 @@ async def test_base_keypad_inheritance_and_scheduling() -> None:
     changed = await keypad.apply_passcode_schedules(schedules)
     assert changed is True
     keypad.add_passcode.assert_awaited_once_with("123456", "Active User")
+
+
+def test_disconnect_callback() -> None:
+    """Test that disconnect_callback is invoked on disconnection."""
+    cb = MagicMock()
+    mock_ble = MagicMock()
+    mock_ble.address = "AA:BB:CC:DD:EE:FF"
+    dev = SesameDevice(mock_ble, disconnect_callback=cb)
+    dev._on_disconnect(MagicMock())
+    cb.assert_called_once()
+
