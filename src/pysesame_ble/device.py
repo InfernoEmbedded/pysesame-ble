@@ -33,9 +33,9 @@ from .const import (
     ITEM_CARD_MODE_SET,
     ITEM_CARD_NOTIFY,
     ITEM_CARD_VERIFY_TO_CLOUD,
+    ITEM_DISCONNECT_REBOOT,
     ITEM_DOOR_CLOSED,
     ITEM_DOOR_OPEN,
-    ITEM_DISCONNECT_REBOOT,
     ITEM_ENABLE_DFU,
     ITEM_FACE_CHANGE,
     ITEM_FACE_DELETE,
@@ -284,9 +284,7 @@ class SesameDevice:
             await self._client.start_notify(RX_CHAR_UUID, self._on_gatt_notification)
             logger.info("Waiting for session token publish on %s", self.address)
             try:
-                await asyncio.wait_for(
-                    asyncio.shield(self._token_future), timeout=2.0
-                )
+                await asyncio.wait_for(asyncio.shield(self._token_future), timeout=2.0)
             except TimeoutError:
                 try:
                     val = await self._client.read_gatt_char(RX_CHAR_UUID)

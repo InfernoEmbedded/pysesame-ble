@@ -356,9 +356,7 @@ async def test_connect_token_recovery_via_read_gatt_char(monkeypatch: pytest.Mon
 
     # start_notify does not push anything (missed notification race condition)
     mock_client.start_notify = AsyncMock()
-    mock_client.read_gatt_char = AsyncMock(
-        return_value=bytes([0x03, 0x08, 0x0E]) + token_bytes
-    )
+    mock_client.read_gatt_char = AsyncMock(return_value=bytes([0x03, 0x08, 0x0E]) + token_bytes)
 
     monkeypatch.setattr(
         bleak_retry_connector, "establish_connection", AsyncMock(return_value=mock_client)
@@ -429,7 +427,6 @@ async def test_connect_token_recovery_via_notify_toggle(monkeypatch: pytest.Monk
     assert dev._session_token == token_bytes
     assert notify_count == 2
     mock_client.stop_notify.assert_awaited_once()
-
 
 
 def test_on_gatt_notification_error_code() -> None:
@@ -504,6 +501,4 @@ async def test_reboot_command() -> None:
     dev.is_logged_in = True
     dev.send_command = AsyncMock()
     await dev.reboot()
-    dev.send_command.assert_awaited_once_with(
-        6, b"", wait_for_response=False, encrypt=True
-    )
+    dev.send_command.assert_awaited_once_with(6, b"", wait_for_response=False, encrypt=True)
