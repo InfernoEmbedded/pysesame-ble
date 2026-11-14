@@ -1,5 +1,6 @@
 """Tests for device communication, segmentation, and commands in sesame-ble."""
 
+import asyncio
 import struct
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
@@ -317,6 +318,120 @@ async def test_connect_missing_ble_device_error() -> None:
         await dev.connect()
 
 
+@pytest.mark.asyncio
+async def test_connect_normal_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test standard connection where ITEM_INITIAL notification arrives promptly."""
+    import bleak_retry_connector
+
+    mock_client = AsyncMock()
+    mock_client.is_connected = True
+    token_bytes = b"\x12\x34\x56\x78"
+
+    async def mock_start_notify(uuid, cb):
+        # Simulate peripheral sending ITEM_INITIAL immediately
+        cb(None, bytearray(bytes([0x03, 0x08, 0x0E]) + token_bytes))
+
+    mock_client.start_notify.side_effect = mock_start_notify
+    monkeypatch.setattr(
+        bleak_retry_connector, "establish_connection", AsyncMock(return_value=mock_client)
+    )
+
+    mock_ble = MagicMock()
+    mock_ble.address = "AA:BB:CC:DD:EE:FF"
+    dev = SesameDevice(mock_ble)
+    await dev.connect()
+
+    assert dev.is_connected is True
+    assert dev._session_token == token_bytes
+
+
+@pytest.mark.asyncio
+async def test_connect_token_recovery_via_read_gatt_char(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test recovery where initial notify was missed, but read_gatt_char retrieves the token."""
+    import bleak_retry_connector
+
+    mock_client = AsyncMock()
+    mock_client.is_connected = True
+    token_bytes = b"\xaa\xbb\xcc\xdd"
+
+    # start_notify does not push anything (missed notification race condition)
+    mock_client.start_notify = AsyncMock()
+    mock_client.read_gatt_char = AsyncMock(
+        return_value=bytes([0x03, 0x08, 0x0E]) + token_bytes
+    )
+
+    monkeypatch.setattr(
+        bleak_retry_connector, "establish_connection", AsyncMock(return_value=mock_client)
+    )
+
+    # Monkeypatch asyncio.wait_for timeout for fast test execution
+    orig_wait_for = asyncio.wait_for
+
+    async def fast_wait_for(fut, timeout):
+        # Scale down timeouts for test speed
+        if timeout == 2.0:
+            return await orig_wait_for(fut, timeout=0.01)
+        return await orig_wait_for(fut, timeout=timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+
+    mock_ble = MagicMock()
+    mock_ble.address = "AA:BB:CC:DD:EE:FF"
+    dev = SesameDevice(mock_ble)
+    await dev.connect()
+
+    assert dev.is_connected is True
+    assert dev._session_token == token_bytes
+    mock_client.read_gatt_char.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_connect_token_recovery_via_notify_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test recovery where initial notify was missed, read fails, but notify toggle succeeds."""
+    import bleak_retry_connector
+
+    mock_client = AsyncMock()
+    mock_client.is_connected = True
+    token_bytes = b"\x99\x88\x77\x66"
+    notify_count = 0
+
+    async def mock_start_notify(uuid, cb):
+        nonlocal notify_count
+        notify_count += 1
+        if notify_count >= 2:
+            # Second notify call (after toggle) delivers the token
+            cb(None, bytearray(bytes([0x03, 0x08, 0x0E]) + token_bytes))
+
+    mock_client.start_notify.side_effect = mock_start_notify
+    mock_client.stop_notify = AsyncMock()
+    mock_client.read_gatt_char = AsyncMock(side_effect=Exception("Read not supported"))
+
+    monkeypatch.setattr(
+        bleak_retry_connector, "establish_connection", AsyncMock(return_value=mock_client)
+    )
+
+    orig_wait_for = asyncio.wait_for
+
+    async def fast_wait_for(fut, timeout):
+        if timeout == 2.0:
+            return await orig_wait_for(fut, timeout=0.01)
+        return await orig_wait_for(fut, timeout=timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    mock_ble = MagicMock()
+    mock_ble.address = "AA:BB:CC:DD:EE:FF"
+    dev = SesameDevice(mock_ble)
+    await dev.connect()
+
+    assert dev.is_connected is True
+    assert dev._session_token == token_bytes
+    assert notify_count == 2
+    mock_client.stop_notify.assert_awaited_once()
+
+
+
 def test_on_gatt_notification_error_code() -> None:
     """Test that GATT notification with non-zero result code sets error_code."""
     mock_ble = MagicMock()
@@ -372,3 +487,23 @@ def test_disconnect_callback() -> None:
     dev = SesameDevice(mock_ble, disconnect_callback=cb)
     dev._on_disconnect(MagicMock())
     cb.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reboot_command() -> None:
+    """Test sending disconnectRebootNow command."""
+    mock_ble = MagicMock()
+    mock_ble.address = "AA:BB:CC:DD:EE:FF"
+    dev = SesameDevice(mock_ble)
+
+    # Error when not logged in
+    with pytest.raises(SesameCommandError, match="Device is not logged in"):
+        await dev.reboot()
+
+    # Success when logged in
+    dev.is_logged_in = True
+    dev.send_command = AsyncMock()
+    await dev.reboot()
+    dev.send_command.assert_awaited_once_with(
+        6, b"", wait_for_response=False, encrypt=True
+    )

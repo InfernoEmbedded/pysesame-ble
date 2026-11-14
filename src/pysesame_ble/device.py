@@ -35,6 +35,7 @@ from .const import (
     ITEM_CARD_VERIFY_TO_CLOUD,
     ITEM_DOOR_CLOSED,
     ITEM_DOOR_OPEN,
+    ITEM_DISCONNECT_REBOOT,
     ITEM_ENABLE_DFU,
     ITEM_FACE_CHANGE,
     ITEM_FACE_DELETE,
@@ -281,8 +282,40 @@ class SesameDevice:
         try:
             self._token_future = asyncio.get_running_loop().create_future()
             await self._client.start_notify(RX_CHAR_UUID, self._on_gatt_notification)
-            logger.debug("Waiting for session token publish")
-            await asyncio.wait_for(self._token_future, timeout=15.0)
+            logger.info("Waiting for session token publish on %s", self.address)
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._token_future), timeout=2.0
+                )
+            except TimeoutError:
+                try:
+                    val = await self._client.read_gatt_char(RX_CHAR_UUID)
+                    logger.warning(
+                        "[%s] read_gatt_char returned: %s",
+                        self.address,
+                        bytes(val).hex() if val else "<empty>",
+                    )
+                    if val and not self._token_future.done():
+                        self._on_gatt_notification(None, bytearray(val))
+                except Exception as err:
+                    logger.warning("[%s] Failed reading RX_CHAR: %s", self.address, err)
+
+                if not self._token_future.done():
+                    logger.warning(
+                        "[%s] Initial token not received, toggling CCCD notify", self.address
+                    )
+                    try:
+                        await self._client.stop_notify(RX_CHAR_UUID)
+                        logger.warning("[%s] stop_notify completed", self.address)
+                        await asyncio.sleep(0.3)
+                        await self._client.start_notify(RX_CHAR_UUID, self._on_gatt_notification)
+                        logger.warning("[%s] re-start_notify completed", self.address)
+                    except Exception as err:
+                        logger.warning(
+                            "[%s] Failed toggling notify on RX_CHAR: %s", self.address, err
+                        )
+
+                await asyncio.wait_for(self._token_future, timeout=12.0)
         except Exception:
             await self.disconnect()
             raise
@@ -390,6 +423,25 @@ class SesameDevice:
         logger.info("Sending ENABLE_DFU command to device %s", self.address)
         await self.send_command(ITEM_ENABLE_DFU, b"\x01", wait_for_response=False)
 
+    async def reboot(self) -> None:
+        """Sends the disconnectRebootNow command to restart the device."""
+        if not self.is_logged_in:
+            raise SesameCommandError("Device is not logged in")
+        logger.info("Sending disconnectRebootNow command to device %s", self.address)
+        try:
+            await self.send_command(
+                ITEM_DISCONNECT_REBOOT,
+                b"",
+                wait_for_response=False,
+                encrypt=True,
+            )
+        except Exception as err:
+            logger.debug(
+                "Reboot command sent to %s with exception (expected if connection drops): %s",
+                self.address,
+                err,
+            )
+
     async def sync_time(self) -> None:
         """Synchronizes the device's clock with the host time."""
         if not self.is_logged_in:
@@ -485,9 +537,12 @@ class SesameDevice:
         logger.error("Auto-reconnection limit reached. Connection abandoned.")
 
     def _on_gatt_notification(
-        self, characteristic: BleakGATTCharacteristic, data: bytearray
+        self,
+        characteristic: BleakGATTCharacteristic | None,
+        data: bytearray | bytes,
     ) -> None:
         del characteristic
+        logger.warning("[%s] GATT notification raw: %s", self.address, bytes(data).hex())
         res = self._segmenter.feed_packet(bytes(data))
         if not res:
             return
